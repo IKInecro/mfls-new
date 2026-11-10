@@ -397,13 +397,13 @@
                         @if(auth()->user()->role === 'admin' || auth()->user()->role === 'palugada' || auth()->user()->email === 'info@beasiswamncu.com')
                             <a href="{{ route('admin.user.index') }}" onclick="closeSidebar()"
                                 class="flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all duration-200 group
-                                    {{ request()->routeIs('admin.user.index') ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30 shadow-xs' : 'text-slate-400 hover:text-white hover:bg-slate-800/60' }}">
+                                    {{ request()->routeIs('admin.user.*') ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30 shadow-xs' : 'text-slate-400 hover:text-white hover:bg-slate-800/60' }}">
                                 <div class="flex items-center gap-3">
-                                    <span class="iconify text-lg transition-transform group-hover:scale-110 {{ request()->routeIs('admin.user.index') ? 'text-blue-400' : 'text-slate-500 group-hover:text-slate-300' }}"
-                                        data-icon="solar:settings-bold-duotone"></span>
-                                    <span>Manajemen User</span>
+                                    <span class="iconify text-lg transition-transform group-hover:scale-110 {{ request()->routeIs('admin.user.*') ? 'text-blue-400' : 'text-slate-500 group-hover:text-slate-300' }}"
+                                        data-icon="solar:users-group-two-rounded-bold-duotone"></span>
+                                    <span>Kelola User</span>
                                 </div>
-                                @if(request()->routeIs('admin.user.index'))
+                                @if(request()->routeIs('admin.user.*'))
                                     <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
                                 @endif
                             </a>

@@ -1243,12 +1243,40 @@ class AdminController extends Controller
     }
 
     // --- PENGATURAN: MANAJEMEN USER ---
-    public function indexUser()
+    public function indexUser(Request $request)
     {
         if (auth()->user()->role !== 'admin' && auth()->user()->role !== 'palugada' && auth()->user()->email !== 'info@beasiswamncu.com')
             return abort(403);
-        $users = Akun::where('role', '!=', 'pendaftar')->withCount('peserta')->get();
-        return view('admin.user.index', compact('users'));
+
+        $query = Akun::with(['peserta.daftar']);
+
+        // Search by nama, email, nisn, atau asal sekolah
+        if ($request->filled('search')) {
+            $search = trim($request->search);
+            $query->where(function ($q) use ($search) {
+                $q->where('nama', 'like', "%{$search}%")
+                  ->orWhere('email', 'like', "%{$search}%")
+                  ->orWhereHas('peserta', function ($qp) use ($search) {
+                      $qp->where('nisn', 'like', "%{$search}%")
+                         ->orWhere('nama_sekolah', 'like', "%{$search}%");
+                  });
+            });
+        }
+
+        // Filter by role
+        if ($request->filled('role')) {
+            $query->where('role', $request->role);
+        }
+
+        $users = $query->latest('id')->paginate(15)->withQueryString();
+
+        // Statistics ringkasan
+        $totalUsers = Akun::count();
+        $totalPendaftar = Akun::where('role', 'pendaftar')->count();
+        $totalStaff = Akun::where('role', '!=', 'pendaftar')->count();
+        $totalVerified = Akun::whereNotNull('email_verified_at')->count();
+
+        return view('admin.user.index', compact('users', 'totalUsers', 'totalPendaftar', 'totalStaff', 'totalVerified'));
     }
 
     public function destroyPendaftar($id)
@@ -1327,19 +1355,56 @@ class AdminController extends Controller
     {
         if (auth()->user()->role !== 'admin' && auth()->user()->role !== 'palugada' && auth()->user()->email !== 'info@beasiswamncu.com')
             return abort(403);
+
         $request->validate([
             'nama' => 'required|string|max:255',
             'email' => 'required|email|unique:akun,email',
             'password' => 'required|min:6',
-            'role' => 'required|in:admin,panitia,akademik,mentor,palugada,dosen'
+            'role' => 'required|in:admin,panitia,akademik,mentor,palugada,dosen,pendaftar',
+            'nisn' => 'nullable|string|max:20|unique:peserta,nisn',
+            'nama_sekolah' => 'nullable|string|max:255',
         ]);
 
-        Akun::create([
-            'nama' => $request->nama,
-            'email' => $request->email,
-            'password' => \Illuminate\Support\Facades\Hash::make($request->password),
-            'role' => $request->role,
-        ]);
+        \Illuminate\Support\Facades\DB::transaction(function () use ($request) {
+            $user = Akun::create([
+                'nama' => $request->nama,
+                'email' => strtolower(trim($request->email)),
+                'password' => \Illuminate\Support\Facades\Hash::make($request->password),
+                'role' => $request->role,
+                'email_verified_at' => now(),
+            ]);
+
+            // Jika role pendaftar, inisialisasi record peserta & daftar
+            if ($request->role === 'pendaftar') {
+                $nisn = $request->nisn ?: ('GEN' . time() . rand(100, 999));
+                $noWa = $request->no_whatsapp ?: ('08' . rand(100000000, 999999999));
+                $peserta = \App\Models\Peserta::create([
+                    'akun_id' => $user->id,
+                    'nama' => $user->nama,
+                    'nisn' => $nisn,
+                    'no_whatsapp' => $noWa,
+                    'nama_sekolah' => $request->nama_sekolah ?: '-',
+                    'tahun_lulus' => date('Y'),
+                    'jenis_kelamin' => 'Laki-laki',
+                    'tgl_lahir' => '2008-01-01',
+                    'provinsi' => '-',
+                    'kabupaten' => '-',
+                ]);
+
+                \App\Models\Daftar::create([
+                    'peserta_id' => $peserta->id,
+                    'no_wa' => $noWa,
+                    'asal_sekolah' => $peserta->nama_sekolah,
+                    'tahun_lulus' => date('Y'),
+                    'jenis_kelamin' => 'Laki-laki',
+                    'ttl' => '2008-01-01',
+                    'provinsi' => '-',
+                    'kabupaten' => '-',
+                ]);
+            }
+
+            $this->logAktivitas('Tambah User Admin', 'Akun', $user->id, "Admin membuat akun baru: {$user->nama} ({$user->email}) role {$user->role}");
+        });
 
         return back()->with('success', 'User berhasil ditambahkan!');
     }
@@ -1353,24 +1418,42 @@ class AdminController extends Controller
         $rules = [
             'nama' => 'required|string|max:255',
             'email' => 'required|email|unique:akun,email,' . $id,
-            'role' => 'required|in:admin,panitia,akademik,mentor,palugada,dosen'
+            'role' => 'required|in:admin,panitia,akademik,mentor,palugada,dosen,pendaftar',
+            'nisn' => 'nullable|string|max:20',
+            'nama_sekolah' => 'nullable|string|max:255',
         ];
 
-        if ($request->password) {
+        if ($request->filled('password')) {
             $rules['password'] = 'min:6';
         }
 
         $request->validate($rules);
 
         $user->nama = $request->nama;
-        $user->email = $request->email;
+        $user->email = strtolower(trim($request->email));
         $user->role = $request->role;
 
-        if ($request->password) {
+        if ($request->filled('password')) {
             $user->password = \Illuminate\Support\Facades\Hash::make($request->password);
         }
 
         $user->save();
+
+        if ($user->peserta) {
+            $updatePeserta = ['nama' => $user->nama];
+            if ($request->filled('nisn')) {
+                $updatePeserta['nisn'] = $request->nisn;
+            }
+            if ($request->filled('nama_sekolah')) {
+                $updatePeserta['nama_sekolah'] = $request->nama_sekolah;
+                if ($user->peserta->daftar) {
+                    $user->peserta->daftar->update(['asal_sekolah' => $request->nama_sekolah]);
+                }
+            }
+            $user->peserta->update($updatePeserta);
+        }
+
+        $this->logAktivitas('Update User Admin', 'Akun', $user->id, "Admin memperbarui data user: {$user->nama} ({$user->email})");
 
         return back()->with('success', 'Data user berhasil diperbarui!');
     }
@@ -1427,14 +1510,118 @@ class AdminController extends Controller
     {
         if (auth()->user()->role !== 'admin' && auth()->user()->role !== 'palugada' && auth()->user()->email !== 'info@beasiswamncu.com')
             return abort(403);
-        $user = Akun::findOrFail($id);
+        $user = Akun::with(['peserta.berkas', 'peserta.sertifikats'])->findOrFail($id);
 
         if ($user->id === auth()->id()) {
-            return back()->with('error', 'Anda tidak bisa menghapus akun sendiri!');
+            return back()->with('error', 'Anda tidak bisa menghapus akun yang sedang Anda gunakan saat ini!');
         }
 
-        $user->delete();
-        return back()->with('success', 'User berhasil dihapus!');
+        $userName = $user->nama;
+        $userEmail = $user->email;
+        $userRole = $user->role;
+
+        \Illuminate\Support\Facades\DB::transaction(function () use ($user) {
+            // 1. Bersihkan seluruh data peserta dan berkas fisik jika akun pendaftar
+            if ($user->peserta) {
+                $peserta = $user->peserta;
+
+                // Hapus berkas fisik di storage
+                if ($peserta->berkas) {
+                    $berkas = $peserta->berkas;
+                    $singleFiles = [
+                        $berkas->foto,
+                        $berkas->ijazah,
+                        $berkas->kartu_pelajar,
+                        $berkas->surat_rekom,
+                        $berkas->personal_statement,
+                        $berkas->study_plan,
+                        $berkas->surat_rekomendasi_sekolah,
+                        $berkas->motivasi_video,
+                        $berkas->motivasi_video_tiktok,
+                        $berkas->surat_buta_warna,
+                        $berkas->bukti_follow_ig_beasiswamncu,
+                        $berkas->bukti_follow_ig_mncu,
+                        $berkas->bukti_follow_ig_mncunation,
+                        $berkas->bukti_follow_ig_thearetegen,
+                        $berkas->bukti_follow_tiktok_beasiswamncu,
+                        $berkas->bukti_follow_tiktok_mncu,
+                        $berkas->portfolio,
+                    ];
+
+                    foreach ($singleFiles as $file) {
+                        if ($file && \Illuminate\Support\Facades\Storage::disk('public')->exists($file)) {
+                            \Illuminate\Support\Facades\Storage::disk('public')->delete($file);
+                        }
+                    }
+
+                    // Hapus file rapor
+                    for ($i = 1; $i <= 6; $i++) {
+                        $fld = "rapor{$i}";
+                        if (!empty($berkas->$fld)) {
+                            $decoded = json_decode($berkas->$fld, true);
+                            if (is_array($decoded)) {
+                                foreach ($decoded as $rf) {
+                                    if ($rf && \Illuminate\Support\Facades\Storage::disk('public')->exists($rf)) {
+                                        \Illuminate\Support\Facades\Storage::disk('public')->delete($rf);
+                                    }
+                                }
+                            } elseif (\Illuminate\Support\Facades\Storage::disk('public')->exists($berkas->$fld)) {
+                                \Illuminate\Support\Facades\Storage::disk('public')->delete($berkas->$fld);
+                            }
+                        }
+                    }
+
+                    $berkas->forceDelete();
+                }
+
+                // Hapus berkas & record sertifikat
+                if ($peserta->sertifikats && $peserta->sertifikats->count() > 0) {
+                    foreach ($peserta->sertifikats as $sertifikat) {
+                        if (!empty($sertifikat->file) && \Illuminate\Support\Facades\Storage::disk('public')->exists($sertifikat->file)) {
+                            \Illuminate\Support\Facades\Storage::disk('public')->delete($sertifikat->file);
+                        }
+                        $sertifikat->forceDelete();
+                    }
+                }
+
+                // Hapus riwayat relasi seleksi, ujian, nilai
+                $peserta->nilais()->forceDelete();
+                $peserta->jawabanUjians()->forceDelete();
+                $peserta->nilaiUjians()->forceDelete();
+                $peserta->penilaianMentors()->forceDelete();
+                $peserta->penilaianAkademiks()->forceDelete();
+                if ($peserta->keputusan) {
+                    $peserta->keputusan->forceDelete();
+                }
+                \App\Models\SesiUjian::where('peserta_id', $peserta->id)->delete();
+                \App\Models\DispensasiUjian::where('peserta_id', $peserta->id)->delete();
+
+                if ($peserta->daftar) {
+                    $peserta->daftar->forceDelete();
+                }
+
+                $peserta->forceDelete();
+            }
+
+            // 2. Jika akun adalah staf/mentor/dosen/pewawancara, lepaskan ketergantungan relasi
+            \App\Models\Peserta::where('interviewer_id', $user->id)->update(['interviewer_id' => null, 'ruangan' => null]);
+            \App\Models\PenilaianMentor::where('mentor_id', $user->id)->delete();
+            \App\Models\PenilaianAkademik::where('penilai_id', $user->id)->delete();
+            \App\Models\Keputusan::where('akademik_id', $user->id)->delete();
+
+            // 3. Bersihkan OTP, riwayat aktivitas, session, token
+            \App\Models\Otp::where('email', $user->email)->delete();
+            \App\Models\RiwayatAktivitas::where('pelaku_id', $user->id)->delete();
+            \Illuminate\Support\Facades\DB::table('sessions')->where('user_id', $user->id)->delete();
+            \Illuminate\Support\Facades\DB::table('personal_access_tokens')->where('tokenable_id', $user->id)->delete();
+
+            // 4. Hapus akun user
+            $user->forceDelete();
+        });
+
+        $this->logAktivitas('Hapus User Total', 'Akun', $id, "Menghapus akun {$userName} ({$userEmail}, Role: {$userRole}) beserta seluruh data & berkasnya sampai ke akar-akarnya.");
+
+        return back()->with('success', "Akun user {$userName} ({$userEmail}) beserta seluruh data & berkasnya berhasil dihapus sampai ke akar-akarnya!");
     }
 
     public function resetPassword(Request $request, $id)
