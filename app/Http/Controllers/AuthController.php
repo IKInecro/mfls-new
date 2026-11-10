@@ -251,9 +251,6 @@ class AuthController extends Controller
             $otpRecord->delete(); // Cleanup
             session()->forget('registration_payload'); // Cleanup session
 
-            // Send Certificate automatically
-            $certificateService->sendEmail($user->id);
-
             // Auto Login
             Auth::login($user);
 
